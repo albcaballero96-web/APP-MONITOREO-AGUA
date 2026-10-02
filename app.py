@@ -1,13 +1,23 @@
-import os
-from datetime import date, time
-import pandas as pd
+```python
 import streamlit as st
+import pandas as pd
+import re
+from io import BytesIO
+from datetime import date, time
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MASTER_FILE = os.path.join(BASE_DIR, "PARAMETROS_AGUA.xlsx")
-EXPORT_DIR = os.path.join(BASE_DIR, "exportaciones")
-os.makedirs(EXPORT_DIR, exist_ok=True)
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
 
+st.set_page_config(
+    page_title="Monitoreo de Calidad de Agua",
+    page_icon="💧",
+    layout="wide"
+)
+
+ARCHIVO_PARAMETROS = "PARAMETROS_AGUA.xlsx"
+
+# Columnas definitivas de salida
 COLUMNAS_SALIDA = [
     "UBICACIÓN",
     "ESTACIÓN DE MUESTREO",
@@ -18,197 +28,636 @@ COLUMNAS_SALIDA = [
     "PARÁMETROS",
     "RESULTADO",
     "UNIDAD",
-    "NORMA APLICABLE",
-    "OBSERVACIÓN",
+    "NORMA APLICABLE"
 ]
 
-st.set_page_config(
-    page_title="Monitoreo de Calidad de Agua",
-    page_icon="💧",
-    layout="wide",
-)
+
+# ============================================================
+# CARGAR MAESTRO DE PARÁMETROS
+# ============================================================
 
 @st.cache_data
 def cargar_parametros():
-    return pd.read_excel(MASTER_FILE, sheet_name="PARAMETROS", dtype=object)
+    df = pd.read_excel(ARCHIVO_PARAMETROS)
 
-def limpiar_texto(valor):
-    if pd.isna(valor):
-        return ""
-    return str(valor).strip()
+    # Normalizar nombres de columnas
+    df.columns = [str(col).strip() for col in df.columns]
 
-def mostrar_limite(minimo, maximo):
-    minimo = limpiar_texto(minimo)
-    maximo = limpiar_texto(maximo)
-    if minimo and maximo:
-        return f"Rango: {minimo} – {maximo}"
-    if minimo:
-        return f"Mínimo: {minimo}"
-    if maximo:
-        return f"Máximo: {maximo}"
-    return "Sin límite establecido"
+    # Compatibilidad con las columnas generadas anteriormente
+    if "PARAMETRO" in df.columns and "PARÁMETROS" not in df.columns:
+        df = df.rename(columns={"PARAMETRO": "PARÁMETROS"})
 
-def construir_registros(datos, parametros, resultados, observaciones):
-    filas = []
-    for i, (_, p) in enumerate(parametros.iterrows()):
-        filas.append({
-            "UBICACIÓN": datos["ubicacion"],
-            "ESTACIÓN DE MUESTREO": datos["estacion"],
-            "FECHA DE MUESTREO": datos["fecha"].strftime("%d/%m/%Y"),
-            "HORA DE MUESTREO": datos["hora"].strftime("%H:%M:%S"),
-            "UTILIDAD": datos["utilidad"],
-            "TIPO DE ANÁLISIS": limpiar_texto(p["TIPO DE ANÁLISIS"]),
-            "PARÁMETROS": limpiar_texto(p["PARAMETRO"]),
-            "RESULTADO": resultados[i],
-            "UNIDAD": limpiar_texto(p["UNIDAD"]),
-            "NORMA APLICABLE": limpiar_texto(p["NORMA APLICABLE"]),
-            "OBSERVACIÓN": observaciones[i],
-        })
-    return pd.DataFrame(filas, columns=COLUMNAS_SALIDA)
+    return df
 
-st.title("💧 Monitoreo de Calidad de Agua")
-st.caption("Versión 1 — captura de resultados y exportación para Power BI")
 
-parametros = cargar_parametros()
+try:
+    df_parametros = cargar_parametros()
 
-st.subheader("1. Datos del monitoreo")
-
-c1, c2, c3 = st.columns(3)
-with c1:
-    utilidad = st.selectbox(
-        "UTILIDAD",
-        ["CONSUMO", "RIEGO", "FSMA"],
-        index=0,
+except Exception as e:
+    st.error(
+        f"No se pudo cargar el archivo `{ARCHIVO_PARAMETROS}`. "
+        f"Verifica que esté en la misma carpeta que `app.py`."
     )
-with c2:
-    ubicacion = st.text_input("UBICACIÓN", placeholder="Ej. LA RINCONADA")
-with c3:
-    estacion = st.text_input(
-        "ESTACIÓN DE MUESTREO",
-        placeholder="Ej. OSMOSIS - LA RINCONADA",
-    )
-
-c4, c5 = st.columns(2)
-with c4:
-    fecha = st.date_input("FECHA DE MUESTREO", value=date.today(), format="DD/MM/YYYY")
-with c5:
-    hora = st.time_input("HORA DE MUESTREO", value=time(8, 0))
-
-parametros_filtrados = parametros[
-    parametros["UTILIDAD"].astype(str).str.strip().str.upper() == utilidad
-].copy()
-
-if parametros_filtrados.empty:
-    st.error(f"No existen parámetros configurados para {utilidad}.")
     st.stop()
 
-st.subheader(f"2. Resultados — {utilidad}")
 
-resultados = []
-observaciones = []
+# ============================================================
+# FUNCIONES AUXILIARES
+# ============================================================
 
-# Agrupación visual por tipo de análisis
-grupos = list(parametros_filtrados.groupby("TIPO DE ANÁLISIS", sort=False))
+def es_olor_sabor(parametro):
+    """
+    Determina si el parámetro debe utilizar el selector
+    Aceptable / No aceptable.
+    """
+    parametro_normalizado = str(parametro).strip().upper()
 
-for tipo, grupo in grupos:
-    st.markdown(f"### {tipo}")
-    for idx, (_, p) in enumerate(grupo.iterrows()):
-        original_index = p.name
-        # índice único dentro del dataframe filtrado
-        posicion = parametros_filtrados.index.get_loc(original_index)
+    return parametro_normalizado in ["OLOR", "SABOR"]
 
-        parametro = limpiar_texto(p["PARAMETRO"])
-        unidad = limpiar_texto(p["UNIDAD"])
-        limite = mostrar_limite(p["VALOR MIN ESTABLECIDO"], p["VALOR MAX ESTABLECIDO"])
 
-        a, b, c = st.columns([4, 2, 3])
-        with a:
-            st.write(f"**{parametro}**")
-            st.caption(limite)
-        with b:
-            resultado = st.text_input(
-                "Resultado",
-                key=f"resultado_{utilidad}_{original_index}",
-                label_visibility="collapsed",
-                placeholder="Ingrese resultado",
-            )
-        with c:
-            st.caption(f"Unidad: {unidad}")
+def es_numerico_parametro(parametro):
+    """
+    Determina si el parámetro debe ser ingresado como valor numérico.
 
-        obs = st.text_input(
-            "Observación",
-            key=f"obs_{utilidad}_{original_index}",
-            label_visibility="collapsed",
-            placeholder="Observación (opcional)",
+    Olor y Sabor son tratados de forma independiente.
+    Todos los demás parámetros se consideran numéricos,
+    incluyendo parámetros como Temperatura y pH.
+    """
+    return not es_olor_sabor(parametro)
+
+
+def validar_numero(valor):
+    """
+    Valida que el resultado ingresado sea numérico.
+
+    Permite:
+    0
+    1
+    6.61
+    0.0013
+    1500
+    1,25
+
+    No permite:
+    abc
+    6.6 mg
+    <1
+    Aceptable
+    etc.
+    """
+
+    if valor is None:
+        return False
+
+    valor = str(valor).strip()
+
+    if valor == "":
+        return False
+
+    # Permitir punto o coma decimal
+    patron = r"^\d+([.,]\d+)?$"
+
+    return bool(re.fullmatch(patron, valor))
+
+
+def convertir_numero(valor):
+    """
+    Convierte coma decimal a punto para mantener
+    consistencia en el archivo Excel.
+    """
+    return str(valor).strip().replace(",", ".")
+
+
+def generar_excel(df):
+    """
+    Genera el Excel directamente en memoria.
+    """
+
+    output = BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(
+            writer,
+            index=False,
+            sheet_name="BD_AGUA"
         )
 
-        # Guardamos por índice del dataframe filtrado
-        while len(resultados) <= posicion:
-            resultados.append("")
-            observaciones.append("")
-        resultados[posicion] = resultado.strip()
-        observaciones[posicion] = obs.strip()
+        # Ajustar anchos de columnas
+        worksheet = writer.sheets["BD_AGUA"]
+
+        anchos = {
+            "A": 25,
+            "B": 35,
+            "C": 18,
+            "D": 18,
+            "E": 15,
+            "F": 25,
+            "G": 40,
+            "H": 20,
+            "I": 20,
+            "J": 30
+        }
+
+        for columna, ancho in anchos.items():
+            worksheet.column_dimensions[columna].width = ancho
+
+    output.seek(0)
+
+    return output
+
+
+# ============================================================
+# TÍTULO
+# ============================================================
+
+st.title("💧 Registro de Análisis de Calidad de Agua")
+
+st.markdown(
+    """
+    Registra los resultados de laboratorio de acuerdo con el tipo de agua.
+    
+    **Todos los parámetros del tipo de agua seleccionado deben ser completados
+    antes de poder descargar el archivo Excel.**
+    """
+)
+
+
+# ============================================================
+# SELECCIÓN DE UTILIDAD
+# ============================================================
+
+utilidades_disponibles = sorted(
+    df_parametros["UTILIDAD"].dropna().astype(str).unique().tolist()
+)
+
+utilidad = st.selectbox(
+    "UTILIDAD / TIPO DE AGUA",
+    utilidades_disponibles,
+    index=None,
+    placeholder="Seleccione el tipo de agua..."
+)
+
+
+# ============================================================
+# SI NO SE HA SELECCIONADO UTILIDAD
+# ============================================================
+
+if utilidad is None:
+    st.info("Seleccione un tipo de agua para comenzar.")
+    st.stop()
+
+
+# ============================================================
+# FILTRAR PARÁMETROS
+# ============================================================
+
+df_utilidad = df_parametros[
+    df_parametros["UTILIDAD"].astype(str).str.strip() == utilidad
+].copy()
+
+
+if df_utilidad.empty:
+    st.error(
+        f"No se encontraron parámetros configurados para la utilidad: {utilidad}"
+    )
+    st.stop()
+
+
+# ============================================================
+# INFORMACIÓN DE LA MUESTRA
+# ============================================================
+
+st.subheader("📋 Información de la muestra")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    ubicacion = st.text_input(
+        "UBICACIÓN *",
+        placeholder="Ej. LA RINCONADA"
+    )
+
+with col2:
+    estacion = st.text_input(
+        "ESTACIÓN DE MUESTREO *",
+        placeholder="Ej. RESERVORIO - LA RINCONADA"
+    )
+
+col3, col4 = st.columns(2)
+
+with col3:
+    fecha_muestreo = st.date_input(
+        "FECHA DE MUESTREO *",
+        value=date.today(),
+        format="DD/MM/YYYY"
+    )
+
+with col4:
+    hora_muestreo = st.time_input(
+        "HORA DE MUESTREO *",
+        value=time(8, 0)
+    )
+
 
 st.divider()
 
-if st.button("💾 GUARDAR Y GENERAR EXCEL", type="primary", use_container_width=True):
-    if not ubicacion.strip():
-        st.error("Ingrese la UBICACIÓN.")
-        st.stop()
-    if not estacion.strip():
-        st.error("Ingrese la ESTACIÓN DE MUESTREO.")
-        st.stop()
 
-    # Validamos que exista al menos un resultado.
-    if not any(r.strip() for r in resultados):
-        st.error("Ingrese al menos un resultado antes de guardar.")
-        st.stop()
+# ============================================================
+# PARÁMETROS
+# ============================================================
 
-    datos = {
-        "ubicacion": ubicacion.strip(),
-        "estacion": estacion.strip(),
-        "fecha": fecha,
-        "hora": hora,
-        "utilidad": utilidad,
-    }
+st.subheader(
+    f"🧪 Resultados de laboratorio — {utilidad}"
+)
 
-    # Solo exportamos los parámetros que tienen resultado.
-    # Esto reproduce la estructura de tu base real: una fila por resultado
-    # efectivamente informado por el laboratorio.
-    parametros_exportar = parametros_filtrados.reset_index(drop=True).copy()
-    resultados_exportar = []
-    observaciones_exportar = []
-    filas_parametros = []
+st.caption(
+    "Todos los parámetros son obligatorios. "
+    "En parámetros numéricos puede marcar '< LC' cuando el resultado "
+    "del laboratorio corresponda a un valor menor al límite cuantificable."
+)
 
-    for i, resultado in enumerate(resultados):
-        if resultado.strip():
-            filas_parametros.append(i)
-            resultados_exportar.append(resultado)
-            observaciones_exportar.append(observaciones[i])
 
-    parametros_exportar = parametros_exportar.iloc[filas_parametros].reset_index(drop=True)
+# Diccionario para guardar resultados
+resultados = {}
 
-    salida = construir_registros(
-        datos,
-        parametros_exportar,
-        resultados_exportar,
-        observaciones_exportar,
+errores_numericos = []
+
+parametros_faltantes = []
+
+
+# ============================================================
+# AGRUPAR POR TIPO DE ANÁLISIS
+# ============================================================
+
+tipos_analisis = (
+    df_utilidad["TIPO DE ANÁLISIS"]
+    .fillna("Sin clasificar")
+    .astype(str)
+    .drop_duplicates()
+    .tolist()
+)
+
+
+for tipo_analisis in tipos_analisis:
+
+    df_grupo = df_utilidad[
+        df_utilidad["TIPO DE ANÁLISIS"].fillna("Sin clasificar").astype(str)
+        == tipo_analisis
+    ]
+
+    st.markdown(f"### {tipo_analisis}")
+
+    for _, fila in df_grupo.iterrows():
+
+        parametro = str(fila["PARÁMETROS"]).strip()
+
+        unidad = (
+            ""
+            if pd.isna(fila.get("UNIDAD"))
+            else str(fila["UNIDAD"]).strip()
+        )
+
+        norma = (
+            ""
+            if pd.isna(fila.get("NORMA APLICABLE"))
+            else str(fila["NORMA APLICABLE"]).strip()
+        )
+
+        # ----------------------------------------------------
+        # Olor y Sabor
+        # ----------------------------------------------------
+
+        if es_olor_sabor(parametro):
+
+            col1, col2, col3 = st.columns([4, 2, 2])
+
+            with col1:
+                st.markdown(f"**{parametro}**")
+
+            with col2:
+                st.caption(f"Unidad: {unidad}")
+
+            with col3:
+
+                resultado = st.selectbox(
+                    parametro,
+                    options=[
+                        "Seleccione...",
+                        "Aceptable",
+                        "No aceptable"
+                    ],
+                    key=f"resultado_{utilidad}_{parametro}",
+                    label_visibility="collapsed"
+                )
+
+            if resultado == "Seleccione...":
+                resultados[parametro] = ""
+                parametros_faltantes.append(parametro)
+            else:
+                resultados[parametro] = resultado
+
+        # ----------------------------------------------------
+        # PARÁMETROS NUMÉRICOS
+        # ----------------------------------------------------
+
+        else:
+
+            col1, col2, col3, col4 = st.columns([4, 1.5, 1.5, 2])
+
+            with col1:
+                st.markdown(f"**{parametro}**")
+
+                # Mostrar límites establecidos
+                minimo = fila.get("VALOR MIN ESTABLECIDO")
+                maximo = fila.get("VALOR MAX ESTABLECIDO")
+
+                texto_limite = ""
+
+                if pd.notna(minimo) and str(minimo).strip() != "":
+                    texto_limite += f"Min: {minimo}"
+
+                if pd.notna(maximo) and str(maximo).strip() != "":
+                    if texto_limite:
+                        texto_limite += " | "
+                    texto_limite += f"Max: {maximo}"
+
+                if texto_limite:
+                    st.caption(texto_limite)
+
+            with col2:
+                st.caption(f"Unidad: {unidad}")
+
+            with col3:
+                st.caption(f"Norma: {norma}")
+
+            # ------------------------------------------------
+            # CHECKBOX < LC
+            # ------------------------------------------------
+
+            with col4:
+
+                usar_lc = st.checkbox(
+                    "< LC",
+                    key=f"lc_{utilidad}_{parametro}"
+                )
+
+            # ------------------------------------------------
+            # CAMPO DE RESULTADO
+            # ------------------------------------------------
+
+            resultado_ingresado = st.text_input(
+                f"Resultado - {parametro}",
+                key=f"valor_{utilidad}_{parametro}",
+                placeholder="Ingrese valor numérico",
+                disabled=usar_lc,
+                label_visibility="collapsed"
+            )
+
+            # ------------------------------------------------
+            # SI ESTÁ MARCADO < LC
+            # ------------------------------------------------
+
+            if usar_lc:
+
+                resultados[parametro] = "< LC"
+
+            # ------------------------------------------------
+            # SI NO ESTÁ MARCADO < LC
+            # ------------------------------------------------
+
+            else:
+
+                resultado_ingresado = resultado_ingresado.strip()
+
+                if resultado_ingresado == "":
+
+                    resultados[parametro] = ""
+                    parametros_faltantes.append(parametro)
+
+                else:
+
+                    if validar_numero(resultado_ingresado):
+
+                        resultados[parametro] = convertir_numero(
+                            resultado_ingresado
+                        )
+
+                    else:
+
+                        resultados[parametro] = resultado_ingresado
+
+                        errores_numericos.append(
+                            parametro
+                        )
+
+                        st.error(
+                            f"❌ **{parametro}** debe contener únicamente "
+                            f"un valor numérico."
+                        )
+
+
+    st.divider()
+
+
+# ============================================================
+# RESUMEN DE VALIDACIÓN
+# ============================================================
+
+st.subheader("🔎 Validación del registro")
+
+
+# Validación de datos generales
+
+errores_generales = []
+
+if not ubicacion.strip():
+    errores_generales.append("UBICACIÓN")
+
+if not estacion.strip():
+    errores_generales.append("ESTACIÓN DE MUESTREO")
+
+
+# ------------------------------------------------------------
+# Mostrar parámetros faltantes
+# ------------------------------------------------------------
+
+if parametros_faltantes:
+
+    st.warning(
+        f"⚠️ Faltan completar **{len(parametros_faltantes)} parámetro(s)**."
     )
 
-    nombre = f"MONITOREO_{utilidad}_{fecha.strftime('%Y%m%d')}_{hora.strftime('%H%M%S')}.xlsx"
-    ruta = os.path.join(EXPORT_DIR, nombre)
+    with st.expander("Ver parámetros pendientes"):
 
-    with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
-        salida.to_excel(writer, index=False, sheet_name="BASE_DATOS")
+        for parametro in parametros_faltantes:
+            st.write(f"- {parametro}")
 
-    st.success(f"Muestra generada: {nombre}")
-    st.dataframe(salida, use_container_width=True, hide_index=True)
 
-    with open(ruta, "rb") as f:
-        st.download_button(
-            "⬇️ DESCARGAR EXCEL",
-            data=f,
-            file_name=nombre,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+# ------------------------------------------------------------
+# Mostrar errores numéricos
+# ------------------------------------------------------------
+
+if errores_numericos:
+
+    st.error(
+        f"❌ Hay **{len(errores_numericos)} parámetro(s)** "
+        f"con valores no numéricos."
+    )
+
+    with st.expander("Ver parámetros con error"):
+
+        for parametro in errores_numericos:
+            st.write(f"- {parametro}")
+
+
+# ------------------------------------------------------------
+# Mostrar errores generales
+# ------------------------------------------------------------
+
+if errores_generales:
+
+    st.warning(
+        "⚠️ Complete los siguientes datos obligatorios: "
+        + ", ".join(errores_generales)
+    )
+
+
+# ============================================================
+# VALIDACIÓN FINAL
+# ============================================================
+
+registro_completo = (
+    len(parametros_faltantes) == 0
+    and len(errores_numericos) == 0
+    and len(errores_generales) == 0
+)
+
+
+if registro_completo:
+
+    st.success(
+        f"✅ Registro completo. "
+        f"Se han completado los **{len(df_utilidad)} parámetros** "
+        f"correspondientes a {utilidad}."
+    )
+
+else:
+
+    st.info(
+        "🔒 La descarga permanecerá bloqueada hasta completar "
+        "todos los parámetros y corregir los valores ingresados."
+    )
+
+
+# ============================================================
+# GENERAR EXCEL
+# ============================================================
+
+st.divider()
+
+if st.button(
+    "📥 GENERAR Y DESCARGAR EXCEL",
+    type="primary",
+    use_container_width=True,
+    disabled=not registro_completo
+):
+
+    # --------------------------------------------------------
+    # CREAR REGISTROS
+    # --------------------------------------------------------
+
+    registros = []
+
+    for _, fila in df_utilidad.iterrows():
+
+        parametro = str(fila["PARÁMETROS"]).strip()
+
+        resultado = resultados.get(parametro, "")
+
+        tipo_analisis = (
+            ""
+            if pd.isna(fila.get("TIPO DE ANÁLISIS"))
+            else str(fila["TIPO DE ANÁLISIS"]).strip()
         )
+
+        unidad = (
+            ""
+            if pd.isna(fila.get("UNIDAD"))
+            else str(fila["UNIDAD"]).strip()
+        )
+
+        norma = (
+            ""
+            if pd.isna(fila.get("NORMA APLICABLE"))
+            else str(fila["NORMA APLICABLE"]).strip()
+        )
+
+        registros.append({
+            "UBICACIÓN": ubicacion.strip(),
+            "ESTACIÓN DE MUESTREO": estacion.strip(),
+            "FECHA DE MUESTREO": fecha_muestreo.strftime("%d/%m/%Y"),
+            "HORA DE MUESTREO": hora_muestreo.strftime("%H:%M:%S"),
+            "UTILIDAD": utilidad,
+            "TIPO DE ANÁLISIS": tipo_analisis,
+            "PARÁMETROS": parametro,
+            "RESULTADO": resultado,
+            "UNIDAD": unidad,
+            "NORMA APLICABLE": norma
+        })
+
+
+    # --------------------------------------------------------
+    # CREAR DATAFRAME
+    # --------------------------------------------------------
+
+    df_exportacion = pd.DataFrame(
+        registros,
+        columns=COLUMNAS_SALIDA
+    )
+
+
+    # --------------------------------------------------------
+    # SEGURIDAD EXTRA:
+    # NO PERMITIR EXPORTAR FILAS VACÍAS
+    # --------------------------------------------------------
+
+    if df_exportacion["RESULTADO"].astype(str).str.strip().eq("").any():
+
+        st.error(
+            "❌ El archivo no puede ser generado porque existen "
+            "parámetros sin resultado."
+        )
+
+        st.stop()
+
+
+    # --------------------------------------------------------
+    # GENERAR ARCHIVO
+    # --------------------------------------------------------
+
+    archivo_excel = generar_excel(df_exportacion)
+
+
+    nombre_archivo = (
+        f"Monitoreo_Agua_"
+        f"{utilidad}_"
+        f"{fecha_muestreo.strftime('%Y%m%d')}.xlsx"
+    )
+
+
+    st.success(
+        "✅ Todos los parámetros fueron completados correctamente. "
+        "El archivo está listo para descargar."
+    )
+
+
+    st.download_button(
+        label="⬇️ DESCARGAR EXCEL",
+        data=archivo_excel,
+        file_name=nombre_archivo,
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        use_container_width=True
+    )
